@@ -1,0 +1,25 @@
+server-scripts
+========
+
+bulkcheck
+---------------------------
+This is the bulk-check script for server statuses with SNMP.
+
+    ./bulkcheck --mode=load 192.168.0.1
+
+If you want to use the file, please write as below:
+
+    ./bulkcheck --mode=load --file=server.list
+
+Format of listfile is below:
+
+    --- Group A
+    server01
+    server02
+    #server03
+    --- Group B
+    server04
+    server05
+
+lines beginning hyphen("-") are treated as header.
+lines beginning sharp("#") are treated as comments.

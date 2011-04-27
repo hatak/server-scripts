@@ -1,0 +1,199 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+
+use Getopt::Long;
+use Term::ANSIColor qw(:constants);
+use Net::SNMP;
+use Scalar::Util qw(looks_like_number);
+$Term::ANSIColor::AUTORESET = 1;
+
+use constant SERVERFORMAT => '%-24s';
+
+my ( $filename, $mode, $warning, $critical );
+my $modes = {
+    load    => [
+        {
+            header  => '1min',
+            oids    => '1.3.6.1.4.1.2021.10.1.3.1',
+            format  => '%8s',
+            warning => 3,
+            critical => 5,
+        },
+        {
+            header  => '5min',
+            oids    => '1.3.6.1.4.1.2021.10.1.3.2',
+            format  => '%8s',
+            warning => 3,
+            critical => 5,
+        },
+        {
+            header  => '10min',
+            oids    => '1.3.6.1.4.1.2021.10.1.3.3',
+            format  => '%8s',
+            warning => 3,
+            critical => 5,
+        },
+    ],
+    mem     => [
+        {
+            header  => 'total',
+            oids    => '1.3.6.1.4.1.2021.4.5.0',
+            format  => '%12s',
+        },
+        {
+            header  => 'used',
+            oids    => '1.3.6.1.4.1.2021.4.6.0',
+            format  => '%12s',
+        },
+        {
+            header  => 'free',
+            oids    => '1.3.6.1.4.1.2021.4.11.0',
+            format  => '%12s',
+            warning => 20 * 1024 * 1024,
+            critical => 10 * 1024 * 1024,
+            below   => 'true',
+        },
+        {
+            header  => 'avail_swap',
+            oids    => '1.3.6.1.4.1.2021.4.4.0',
+            format  => '%12s',
+        },
+    ],
+    disk     => [
+        {
+            header  => 'total',
+            oids    => '1.3.6.1.4.1.2021.9.1.6.1',
+            format  => '%12s',
+        },
+        {
+            header  => 'used',
+            oids    => '1.3.6.1.4.1.2021.9.1.8.1',
+            format  => '%12s',
+        },
+        {
+            header  => 'free',
+            oids    => '1.3.6.1.4.1.2021.9.1.7.1',
+            format  => '%12s',
+        },
+        {
+            header  => 'used(%)',
+            oids    => '1.3.6.1.4.1.2021.9.1.9.1',
+            format  => '%8s',
+            warning => 80,
+            critical => 90,
+        },
+        {
+            header  => 'inode(%)',
+            oids    => '1.3.6.1.4.1.2021.9.1.10.1',
+            format  => '%8s',
+        },
+    ],
+};
+
+sub get_array {
+    my ( $array_ref, $key ) = @_;
+    my @results;
+    for my $hash (@$array_ref) {
+        my $value = (exists $hash->{$key}) ? $hash->{$key} : '';
+        push @results, $hash->{$key};
+    }
+    return \@results;
+}
+
+GetOptions(
+    '--file|f=s' => \$filename,
+    '--mode|m=s' => \$mode,
+);
+
+$mode ||= 'load';
+
+my @lines;
+if ($filename) {
+    open my $FH, '<', $filename;
+    @lines = <$FH>;
+    close $FH;
+} elsif (scalar @ARGV >= 1) {
+    @lines = @ARGV;
+} else {
+    die 'no target selected. abort.'
+}
+
+my $results = [];
+if ($lines[0] !~ /^\-/) {
+    unshift @lines, '-';
+}
+
+my $headers = get_array($modes->{$mode}, 'header');
+my $oids = get_array($modes->{$mode}, 'oids');
+my $formats = get_array($modes->{$mode}, 'format');
+my $warnings = get_array($modes->{$mode}, 'warning');
+my $criticals = get_array($modes->{$mode}, 'critical');
+my $belows = get_array($modes->{$mode}, 'below');
+
+for my $line (@lines) {
+    chomp $line;
+    if ( $line !~ /^#/ ) {
+        if ( $line !~ /^\-/ ) {
+            my $target_name = sprintf SERVERFORMAT, $line;
+            my $result = ["$target_name"];
+            my $values = connect_snmp($line, $oids);
+            for my $i (0 .. (scalar(@{$oids}) - 1) ) {
+                my $value = '';
+                my $style;
+                if ( $criticals->[$i] && (( !$belows->[$i] && $values->{$oids->[$i]} >= $criticals->[$i] ) || ($belows->[$i] && $values->{$oids->[$i]} <= $criticals->[$i])) ) {
+                    $style = RED.BOLD;
+                } elsif ( $warnings->[$i] && (( !$belows->[$i] && $values->{$oids->[$i]} >= $warnings->[$i] ) || ($belows->[$i] && $values->{$oids->[$i]} <= $warnings->[$i])) ) {
+                    $style = YELLOW.BOLD;
+                }
+                $value .= $style if $style;
+                $value .= (sprintf $formats->[$i], commify($values->{$oids->[$i]}));
+                $value .= RESET if $style;
+                push @$result, $value;
+            }
+            push @$results, $result;
+        } else {
+            $line =~ s/^\-+\s?//g;
+            my $header = (sprintf SERVERFORMAT, $line);
+            for my $i (0 .. (scalar(@{$headers}) - 1)) {
+                $header .= sprintf $formats->[$i], $headers->[$i];
+            }
+            push @$results, $header;
+        }
+    }
+}
+
+for my $printline (@$results) {
+    if (ref($printline) eq 'ARRAY') {
+        print @$printline;
+    } else {
+        print BOLD.$printline.RESET;
+    }
+    print "\n";
+}
+
+exit;
+
+sub connect_snmp {
+    my $host = shift;
+    my $oids = shift;
+
+    my ($session, $error);
+    ($session, $error) = Net::SNMP->session(
+        -hostname  => $host,
+        -community => 'public',
+        -port      => '161' ) or return $error;
+
+    my $res;
+    if (!defined($res = $session->get_request(@$oids))) {
+        printf("ERROR: %s.\n", $session->error());
+    }
+    return $res;
+}
+
+sub commify{
+    my $num = shift;
+    while ($num =~ s/^([-+]?\d+)(\d{3})/$1,$2/) { }
+    return $num;
+}
